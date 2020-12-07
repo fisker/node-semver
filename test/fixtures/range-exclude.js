@@ -13,6 +13,7 @@ module.exports = [
   ['^1.2.3', '1.2.3-beta'],
   ['=0.7.x', '0.7.0-asdf'],
   ['>=0.7.x', '0.7.0-asdf'],
+  ['<=0.7.x', '0.7.0-asdf'],
   ['1', '1.0.0beta', { loose: 420 }],
   ['<1', '1.0.0beta', true],
   ['< 1', '1.0.0beta', true],
@@ -77,6 +78,7 @@ module.exports = [
 
   ['2.x', '3.0.0-pre.0', { includePrerelease: true }],
   ['^1.0.0', '1.0.0-rc1', { includePrerelease: true }],
+  ['^1.0.0', '2.0.0-rc1', { includePrerelease: true }],
   ['^1.2.3-rc2', '2.0.0', { includePrerelease: true }],
   ['^1.0.0', '2.0.0-rc1', { includePrerelease: true }],
   ['^1.0.0', '2.0.0-rc1'],
@@ -85,4 +87,20 @@ module.exports = [
   ['1 - 2', '2.0.0-pre'],
   ['1 - 2', '1.0.0-pre'],
   ['1.0 - 2', '1.0.0-pre'],
+
+  ['1.1.x', '1.0.0-a'],
+  ['1.1.x', '1.1.0-a'],
+  ['1.1.x', '1.2.0-a'],
+  ['1.1.x', '1.2.0-a', { includePrerelease: true }],
+  ['1.1.x', '1.0.0-a', { includePrerelease: true }],
+  ['1.x', '1.0.0-a'],
+  ['1.x', '1.1.0-a'],
+  ['1.x', '1.2.0-a'],
+  ['1.x', '0.0.0-a', { includePrerelease: true }],
+  ['1.x', '2.0.0-a', { includePrerelease: true }],
+
+  ['>=1.0.0 <1.1.0', '1.1.0'],
+  ['>=1.0.0 <1.1.0', '1.1.0', { includePrerelease: true }],
+  ['>=1.0.0 <1.1.0', '1.1.0-pre'],
+  ['>=1.0.0 <1.1.0-pre', '1.1.0-pre'],
 ]

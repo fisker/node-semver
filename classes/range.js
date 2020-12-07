@@ -1,12 +1,7 @@
 // hoisted class for cyclic dependency
 class Range {
   constructor (range, options) {
-    if (!options || typeof options !== 'object') {
-      options = {
-        loose: !!options,
-        includePrerelease: false
-      }
-    }
+    options = parseOptions(options)
 
     if (range instanceof Range) {
       if (
@@ -46,6 +41,24 @@ class Range {
       throw new TypeError(`Invalid SemVer Range: ${range}`)
     }
 
+    // if we have any that are not the null set, throw out null sets.
+    if (this.set.length > 1) {
+      // keep the first one, in case they're all null sets
+      const first = this.set[0]
+      this.set = this.set.filter(c => !isNullSet(c[0]))
+      if (this.set.length === 0)
+        this.set = [first]
+      else if (this.set.length > 1) {
+        // if we have any that are *, then the range is just *
+        for (const c of this.set) {
+          if (c.length === 1 && isAny(c[0])) {
+            this.set = [c]
+            break
+          }
+        }
+      }
+    }
+
     this.format()
   }
 
@@ -64,8 +77,17 @@ class Range {
   }
 
   parseRange (range) {
-    const loose = this.options.loose
     range = range.trim()
+
+    // memoize range parsing for performance.
+    // this is a very hot path, and fully deterministic.
+    const memoOpts = Object.keys(this.options).join(',')
+    const memoKey = `parseRange:${memoOpts}:${range}`
+    const cached = cache.get(memoKey)
+    if (cached)
+      return cached
+
+    const loose = this.options.loose
     // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
     const hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
     range = range.replace(hr, hyphenReplace(this.options.includePrerelease))
@@ -87,15 +109,33 @@ class Range {
     // ready to be split into comparators.
 
     const compRe = loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
-    return range
+    const rangeList = range
       .split(' ')
       .map(comp => parseComparator(comp, this.options))
       .join(' ')
       .split(/\s+/)
+      // >=0.0.0 is equivalent to *
       .map(comp => replaceGTE0(comp, this.options))
       // in loose mode, throw out any that are not valid comparators
       .filter(this.options.loose ? comp => !!comp.match(compRe) : () => true)
       .map(comp => new Comparator(comp, this.options))
+
+    // if any comparators are the null set, then replace with JUST null set
+    // if more than one comparator, remove any * comparators
+    // also, don't include the same comparator more than once
+    const l = rangeList.length
+    const rangeMap = new Map()
+    for (const comp of rangeList) {
+      if (isNullSet(comp))
+        return [comp]
+      rangeMap.set(comp.value, comp)
+    }
+    if (rangeMap.size > 1 && rangeMap.has(''))
+      rangeMap.delete('')
+
+    const result = [...rangeMap.values()]
+    cache.set(memoKey, result)
+    return result
   }
 
   intersects (range, options) {
@@ -144,6 +184,10 @@ class Range {
 }
 module.exports = Range
 
+const LRU = require('lru-cache')
+const cache = new LRU({ max: 1000 })
+
+const parseOptions = require('../internal/parse-options')
 const Comparator = require('./comparator')
 const debug = require('../internal/debug')
 const SemVer = require('./semver')
@@ -154,6 +198,9 @@ const {
   tildeTrimReplace,
   caretTrimReplace
 } = require('../internal/re')
+
+const isNullSet = c => c.value === '<0.0.0-0'
+const isAny = c => c.value === ''
 
 // take a set of comparators and determine whether there
 // exists a version which can satisfy it
@@ -192,11 +239,11 @@ const parseComparator = (comp, options) => {
 const isX = id => !id || id.toLowerCase() === 'x' || id === '*'
 
 // ~, ~> --> * (any, kinda silly)
-// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0
-// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0
-// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0
-// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0
-// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0
+// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0-0
+// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0-0
+// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0-0
+// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0-0
+// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0-0
 const replaceTildes = (comp, options) =>
   comp.trim().split(/\s+/).map((comp) => {
     return replaceTilde(comp, options)
@@ -211,18 +258,18 @@ const replaceTilde = (comp, options) => {
     if (isX(M)) {
       ret = ''
     } else if (isX(m)) {
-      ret = `>=${M}.0.0 <${+M + 1}.0.0`
+      ret = `>=${M}.0.0 <${+M + 1}.0.0-0`
     } else if (isX(p)) {
-      // ~1.2 == >=1.2.0 <1.3.0
-      ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0`
+      // ~1.2 == >=1.2.0 <1.3.0-0
+      ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0-0`
     } else if (pr) {
       debug('replaceTilde pr', pr)
       ret = `>=${M}.${m}.${p}-${pr
-      } <${M}.${+m + 1}.0`
+      } <${M}.${+m + 1}.0-0`
     } else {
-      // ~1.2.3 == >=1.2.3 <1.3.0
+      // ~1.2.3 == >=1.2.3 <1.3.0-0
       ret = `>=${M}.${m}.${p
-      } <${M}.${+m + 1}.0`
+      } <${M}.${+m + 1}.0-0`
     }
 
     debug('tilde return', ret)
@@ -231,11 +278,11 @@ const replaceTilde = (comp, options) => {
 }
 
 // ^ --> * (any, kinda silly)
-// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0
-// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0
-// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0
-// ^1.2.3 --> >=1.2.3 <2.0.0
-// ^1.2.0 --> >=1.2.0 <2.0.0
+// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0-0
+// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0-0
+// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0-0
+// ^1.2.3 --> >=1.2.3 <2.0.0-0
+// ^1.2.0 --> >=1.2.0 <2.0.0-0
 const replaceCarets = (comp, options) =>
   comp.trim().split(/\s+/).map((comp) => {
     return replaceCaret(comp, options)
@@ -252,40 +299,40 @@ const replaceCaret = (comp, options) => {
     if (isX(M)) {
       ret = ''
     } else if (isX(m)) {
-      ret = `>=${M}.0.0${z} <${+M + 1}.0.0${z}`
+      ret = `>=${M}.0.0${z} <${+M + 1}.0.0-0`
     } else if (isX(p)) {
       if (M === '0') {
-        ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0${z}`
+        ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0-0`
       } else {
-        ret = `>=${M}.${m}.0${z} <${+M + 1}.0.0${z}`
+        ret = `>=${M}.${m}.0${z} <${+M + 1}.0.0-0`
       }
     } else if (pr) {
       debug('replaceCaret pr', pr)
       if (M === '0') {
         if (m === '0') {
           ret = `>=${M}.${m}.${p}-${pr
-          } <${M}.${m}.${+p + 1}${z}`
+          } <${M}.${m}.${+p + 1}-0`
         } else {
           ret = `>=${M}.${m}.${p}-${pr
-          } <${M}.${+m + 1}.0${z}`
+          } <${M}.${+m + 1}.0-0`
         }
       } else {
         ret = `>=${M}.${m}.${p}-${pr
-        } <${+M + 1}.0.0${z}`
+        } <${+M + 1}.0.0-0`
       }
     } else {
       debug('no pr')
       if (M === '0') {
         if (m === '0') {
           ret = `>=${M}.${m}.${p
-          }${z} <${M}.${m}.${+p + 1}${z}`
+          }${z} <${M}.${m}.${+p + 1}-0`
         } else {
           ret = `>=${M}.${m}.${p
-          }${z} <${M}.${+m + 1}.0${z}`
+          }${z} <${M}.${+m + 1}.0-0`
         }
       } else {
         ret = `>=${M}.${m}.${p
-        } <${+M + 1}.0.0${z}`
+        } <${+M + 1}.0.0-0`
       }
     }
 
@@ -358,12 +405,15 @@ const replaceXRange = (comp, options) => {
         }
       }
 
+      if (gtlt === '<')
+        pr = '-0'
+
       ret = `${gtlt + M}.${m}.${p}${pr}`
     } else if (xm) {
-      ret = `>=${M}.0.0${pr} <${+M + 1}.0.0${pr}`
+      ret = `>=${M}.0.0${pr} <${+M + 1}.0.0-0`
     } else if (xp) {
       ret = `>=${M}.${m}.0${pr
-      } <${M}.${+m + 1}.0${pr}`
+      } <${M}.${+m + 1}.0-0`
     }
 
     debug('xRange return', ret)
@@ -389,8 +439,8 @@ const replaceGTE0 = (comp, options) => {
 // This function is passed to string.replace(re[t.HYPHENRANGE])
 // M, m, patch, prerelease, build
 // 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
-// 1.2.3 - 3.4 => >=1.2.0 <3.5.0 Any 3.4.x will do
-// 1.2 - 3.4 => >=1.2.0 <3.5.0
+// 1.2.3 - 3.4 => >=1.2.0 <3.5.0-0 Any 3.4.x will do
+// 1.2 - 3.4 => >=1.2.0 <3.5.0-0
 const hyphenReplace = incPr => ($0,
   from, fM, fm, fp, fpr, fb,
   to, tM, tm, tp, tpr, tb) => {
@@ -409,9 +459,9 @@ const hyphenReplace = incPr => ($0,
   if (isX(tM)) {
     to = ''
   } else if (isX(tm)) {
-    to = `<${+tM + 1}.0.0${incPr ? '-0' : ''}`
+    to = `<${+tM + 1}.0.0-0`
   } else if (isX(tp)) {
-    to = `<${tM}.${+tm + 1}.0${incPr ? '-0' : ''}`
+    to = `<${tM}.${+tm + 1}.0-0`
   } else if (tpr) {
     to = `<=${tM}.${tm}.${tp}-${tpr}`
   } else if (incPr) {
